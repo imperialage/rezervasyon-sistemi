@@ -1,0 +1,57 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* Time Picker Customization */
+.react-time-picker {
+  @apply w-full;
+}
+
+.react-time-picker__wrapper {
+  @apply border rounded-lg pl-10 pr-3 py-2 w-full bg-white;
+}
+
+.react-time-picker__inputGroup {
+  @apply pl-0;
+}
+
+.react-time-picker__inputGroup__input {
+  @apply outline-none;
+}
+
+.react-time-picker__inputGroup__divider {
+  @apply px-1;
+}
+
+.react-time-picker__button {
+  @apply p-2 hover:bg-gray-100 rounded-lg;
+}
+
+.react-time-picker__button svg {
+  @apply stroke-gray-500;
+}
+
+.react-time-picker__clock {
+  @apply hidden;
+}
+
+/* Phone Input Customization */
+.PhoneInput {
+  @apply relative;
+}
+
+.PhoneInputCountry {
+  @apply absolute left-3 top-1/2 transform -translate-y-1/2 z-10;
+}
+
+.PhoneInputCountrySelect {
+  @apply absolute opacity-0 top-0 left-0 h-full w-16 cursor-pointer;
+}
+
+.PhoneInputCountryIcon {
+  @apply w-6 h-4 overflow-hidden rounded;
+}
+
+.PhoneInputInput {
+  @apply w-full pl-16 pr-3 py-2 border rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500;
+}

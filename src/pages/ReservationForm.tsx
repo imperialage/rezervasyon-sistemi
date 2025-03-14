@@ -1,0 +1,528 @@
+import React, { useState, useEffect } from 'react';
+import { useParams, useNavigate } from 'react-router-dom';
+import { collection, addDoc, doc, updateDoc, query, where, getDocs } from 'firebase/firestore';
+import { db } from '../firebase';
+import { toast } from 'react-hot-toast';
+import { smsService } from '../services/sms.service';
+import DatePicker from 'react-datepicker';
+import PhoneInput from 'react-phone-number-input';
+import CustomTimePicker from '../components/CustomTimePicker';
+import "react-datepicker/dist/react-datepicker.css";
+import "react-phone-number-input/style.css";
+import { format } from 'date-fns';
+import { tr } from 'date-fns/locale';
+import { User, Users, CalendarDays, FileText, Baby } from 'lucide-react';
+import { useAuth } from '../contexts/AuthContext';
+import { formatPhoneToE164, validatePhoneNumber } from '../utils/phone-utils';
+import { cleanReservationData } from '../utils/reservation-utils';
+
+const generateReservationCode = () => {
+  const chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789';
+  return Array.from({ length: 6 }, () => chars[Math.floor(Math.random() * chars.length)]).join('');
+};
+
+const generateHistoryId = () => {
+  return `hist_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
+};
+
+const ReservationForm = () => {
+  const { code } = useParams();
+  const navigate = useNavigate();
+  const { currentUser } = useAuth();
+  const [loading, setLoading] = useState(false);
+  const [submitting, setSubmitting] = useState(false);
+  const [originalData, setOriginalData] = useState<any>(null);
+  const [showCancelConfirm, setShowCancelConfirm] = useState(false);
+  const [validationErrors, setValidationErrors] = useState<{[key: string]: string}>({});
+  const [reservation, setReservation] = useState({
+    fullName: '',
+    phone: '',
+    date: new Date(),
+    time: '19:00',
+    guests: '',
+    childCount: '',
+    notes: '',
+    code: code || generateReservationCode(),
+    status: 'aktif',
+    salon: '',
+    masa: ''
+  });
+
+  useEffect(() => {
+    const fetchReservation = async () => {
+      if (code) {
+        try {
+          setLoading(true);
+          console.log('Rezervasyon aranıyor, kod:', code);
+          
+          const reservationsRef = collection(db, 'reservations');
+          const q = query(reservationsRef, where('code', '==', code.toUpperCase()));
+          const querySnapshot = await getDocs(q);
+
+          if (!querySnapshot.empty) {
+            const doc = querySnapshot.docs[0];
+            const data = doc.data();
+            console.log('Bulunan rezervasyon:', data);
+            
+            // Telefon numarasını formatla
+            const formattedPhone = formatPhoneToE164(data.phone || '');
+            console.log('Formatlanmış telefon:', formattedPhone);
+            
+            // Form verilerini ayarla
+            const formData = {
+              fullName: data.fullName || '',
+              phone: formattedPhone,
+              date: new Date(data.date),
+              time: data.time || '19:00',
+              guests: data.guests?.toString() || '',
+              childCount: data.childCount?.toString() || '',
+              notes: data.notes || '',
+              code: data.code,
+              status: data.status || 'aktif',
+              salon: data.salon || '',
+              masa: data.masa || ''
+            };
+            
+            setReservation(formData);
+            
+            // Orijinal veriyi sakla
+            setOriginalData({
+              ...data,
+              id: doc.id,
+              phone: formattedPhone,
+              history: data.history || []
+            });
+          } else {
+            console.log('Rezervasyon bulunamadı');
+            toast.error('Rezervasyon bulunamadı');
+            navigate('/rezervasyon');
+          }
+        } catch (error) {
+          console.error('Rezervasyon yükleme hatası:', error);
+          toast.error('Rezervasyon yüklenirken bir hata oluştu');
+          navigate('/rezervasyon');
+        } finally {
+          setLoading(false);
+        }
+      }
+    };
+
+    fetchReservation();
+  }, [code, navigate]);
+
+  const getChanges = (newData: any, oldData: any) => {
+    if (!oldData) return [];
+
+    const changes = [];
+    const fieldsToCheck = [
+      'fullName', 'phone', 'date', 'time', 'guests', 'childCount',
+      'notes', 'status', 'salon', 'masa'
+    ];
+
+    for (const field of fieldsToCheck) {
+      const oldValue = oldData[field];
+      const newValue = newData[field];
+
+      if (field === 'date') {
+        const oldDate = format(new Date(oldValue), 'yyyy-MM-dd');
+        const newDate = format(new Date(newValue), 'yyyy-MM-dd');
+        if (oldDate !== newDate) {
+          changes.push({ field, oldValue: oldDate, newValue: newDate });
+        }
+      } else if (String(oldValue) !== String(newValue)) {
+        changes.push({ field, oldValue, newValue });
+      }
+    }
+
+    return changes;
+  };
+
+  const validateReservation = () => {
+    const errors: {[key: string]: string} = {};
+    
+    if (!reservation.guests) {
+      errors.guests = 'Lütfen yetişkin sayısı giriniz';
+    }
+
+    if (!validatePhoneNumber(reservation.phone)) {
+      errors.phone = 'Lütfen geçerli bir telefon numarası giriniz';
+    }
+
+    // İş saatleri kontrolü (06:00 - 22:00)
+    const [hours, minutes] = reservation.time.split(':').map(Number);
+    const timeValue = hours * 60 + minutes;
+    if (timeValue < 360 || timeValue > 1320) { // 06:00 = 360 dk, 22:00 = 1320 dk
+      errors.time = 'Rezervasyon saati 06:00 - 22:00 arasında olmalıdır';
+    }
+
+    setValidationErrors(errors);
+    return Object.keys(errors).length === 0;
+  };
+
+  const handleSubmit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    
+    if (!validateReservation()) {
+      const errorMessage = Object.values(validationErrors)[0];
+      toast.error(errorMessage);
+      return;
+    }
+
+    setSubmitting(true);
+
+    try {
+      setLoading(true);
+      
+      // Temiz veriyi hazırla
+      const cleanData = cleanReservationData(reservation);
+      console.log('Temizlenmiş veri:', cleanData);
+
+      if (code) {
+        // Mevcut rezervasyonu güncelle
+        const reservationsRef = collection(db, 'reservations');
+        const q = query(reservationsRef, where('code', '==', code.toUpperCase()));
+        const querySnapshot = await getDocs(q);
+        
+        if (!querySnapshot.empty) {
+          const docRef = doc(db, 'reservations', querySnapshot.docs[0].id);
+          const changes = getChanges(cleanData, originalData);
+          
+          if (changes.length > 0) {
+            const historyEntry = {
+              id: generateHistoryId(),
+              timestamp: new Date().toISOString(),
+              updatedBy: currentUser?.email || 'unknown',
+              changes
+            };
+
+            const updateData = {
+              ...cleanData,
+              history: [...(originalData.history || []), historyEntry]
+            };
+
+            console.log('Güncellenecek veri:', updateData);
+            await updateDoc(docRef, updateData);
+            
+            toast.success('Rezervasyon güncellendi');
+            navigate('/');
+          } else {
+            toast.info('Değişiklik yapılmadı');
+          }
+        } else {
+          toast.error('Rezervasyon bulunamadı');
+        }
+      } else {
+        // Yeni rezervasyon oluştur
+        const newData = {
+          ...cleanData,
+          createdAt: new Date().toISOString(),
+          history: []
+        };
+
+        console.log('Yeni rezervasyon verisi:', newData);
+        const docRef = await addDoc(collection(db, 'reservations'), newData);
+
+        try {
+          const formatName = (name: string) => {
+            return name
+              .split(' ')
+              .map(word => word.charAt(0).toUpperCase() + word.slice(1).toLowerCase())
+              .join(' ');
+          };
+
+          const confirmationMessage = [
+            `KEBAPHAN - Rezervasyon Onayı`,
+            ``,
+            `Sayın ${formatName(cleanData.fullName)}, rezervasyonunuz başarı ile oluşturuldu.`,
+            ``,
+            `Tarih: ${format(new Date(cleanData.date), 'dd/MM/yyyy')}`,
+            `Saat: ${cleanData.time}`,
+            `Kişi: ${cleanData.guests} Yetişkin${cleanData.childCount ? `, ${cleanData.childCount} Çocuk` : ''}`,
+            `Rezervasyon Kodu: ${cleanData.code}`,
+            ``,
+            `Bu kod ile rezervenizi sorgulayıp düzenleyebilirsiniz.`,
+            ``,
+            `İyi günler dileriz.`
+          ].join('\\n');
+          
+          const response = await smsService.sendSMS(cleanData.phone, confirmationMessage);
+          
+          if (response.success) {
+            console.log('✅ SMS gönderildi:', response.messageId);
+            toast.success('Rezervasyon ve SMS gönderimi başarılı');
+          } else {
+            console.error('❌ SMS hatası:', response.message);
+            toast.error(`SMS Hatası: ${response.message}`);
+          }
+        } catch (error) {
+          console.error('SMS hatası:', error);
+          toast.error('Rezervasyon oluşturuldu fakat SMS gönderilemedi');
+        }
+
+        navigate('/');
+      }
+    } catch (error) {
+      console.error('Rezervasyon kayıt hatası:', error);
+      toast.error('Bir hata oluştu. Lütfen tekrar deneyin.');
+    } finally {
+      setLoading(false);
+      setSubmitting(false);
+    }
+  };
+
+  const handleGuestChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const value = e.target.value;
+    if (value === '') {
+      setReservation({ ...reservation, guests: '' });
+    } else {
+      const numValue = parseInt(value);
+      if (!isNaN(numValue) && numValue >= 1 && numValue <= 100) {
+        setReservation({ ...reservation, guests: value });
+      }
+    }
+  };
+
+  const handleChildCountChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const value = e.target.value;
+    if (value === '') {
+      setReservation({ ...reservation, childCount: '' });
+    } else {
+      const numValue = parseInt(value);
+      if (!isNaN(numValue) && numValue >= 0 && numValue <= 50) {
+        setReservation({ ...reservation, childCount: value });
+      }
+    }
+  };
+
+  const handleCancel = async () => {
+    if (!code) return;
+
+    try {
+      setLoading(true);
+      
+      const reservationsRef = collection(db, 'reservations');
+      const q = query(reservationsRef, where('code', '==', code.toUpperCase()));
+      const querySnapshot = await getDocs(q);
+      
+      if (!querySnapshot.empty) {
+        const docRef = doc(db, 'reservations', querySnapshot.docs[0].id);
+        const changes = [{
+          field: 'status',
+          oldValue: originalData.status,
+          newValue: 'iptal'
+        }];
+
+        const historyEntry = {
+          id: generateHistoryId(),
+          timestamp: new Date().toISOString(),
+          updatedBy: currentUser?.email || 'unknown',
+          changes
+        };
+
+        // Temiz veriyi hazırla
+        const cleanData = cleanReservationData({
+          ...reservation,
+          status: 'iptal'
+        });
+
+        const updateData = {
+          ...cleanData,
+          history: [...(originalData.history || []), historyEntry]
+        };
+
+        console.log('İptal verisi:', updateData);
+        await updateDoc(docRef, updateData);
+
+        toast.success('Rezervasyon iptal edildi');
+        navigate('/');
+      } else {
+        toast.error('Rezervasyon bulunamadı');
+      }
+    } catch (error) {
+      console.error('Rezervasyon iptal hatası:', error);
+      toast.error('Rezervasyon iptal edilirken bir hata oluştu');
+    } finally {
+      setLoading(false);
+      setShowCancelConfirm(false);
+    }
+  };
+
+  return (
+    <div className="max-w-2xl mx-auto">
+      <div className="bg-white p-8 rounded-lg shadow-md">
+        <h2 className="text-2xl font-bold text-center mb-6">
+          {code ? 'Rezervasyon Düzenle' : 'Yeni Rezervasyon'}
+        </h2>
+        <form onSubmit={handleSubmit}>
+          {submitting && (
+            <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50">
+              <div className="bg-white p-6 rounded-lg shadow-xl">
+                <div className="flex items-center space-x-3">
+                  <div className="animate-spin rounded-full h-6 w-6 border-b-2 border-blue-600"></div>
+                  <span>Rezervasyon işleniyor...</span>
+                </div>
+              </div>
+            </div>
+          )}
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+            <div>
+              <label className="block text-gray-700 text-sm font-bold mb-2">
+                Ad Soyad
+              </label>
+              <div className="relative">
+                <User className="absolute left-3 top-1/2 transform -translate-y-1/2 text-gray-400" size={20} />
+                <input
+                  type="text"
+                  value={reservation.fullName}
+                  onChange={(e) => setReservation({ ...reservation, fullName: e.target.value })}
+                  className="w-full pl-10 pr-3 py-2 border rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
+                  required
+                />
+              </div>
+            </div>
+            <div>
+              <label className="block text-gray-700 text-sm font-bold mb-2">
+                Telefon
+              </label>
+              <PhoneInput
+                international
+                defaultCountry="TR"
+                value={reservation.phone}
+                onChange={(phone) => setReservation({ ...reservation, phone: phone || '' })}
+                className="phone-input-container"
+                numberInputProps={{
+                  className: "phone-input",
+                  required: true
+                }}
+              />
+            </div>
+            <div>
+              <label className="block text-gray-700 text-sm font-bold mb-2">
+                Tarih
+              </label>
+              <div className="relative">
+                <CalendarDays className="absolute left-3 top-1/2 transform -translate-y-1/2 text-gray-400" size={20} />
+                <DatePicker
+                  selected={reservation.date}
+                  onChange={(date) => setReservation({ ...reservation, date: date || new Date() })}
+                  dateFormat="dd/MM/yyyy"
+                  locale={tr}
+                  minDate={new Date()}
+                  className="w-full pl-10 pr-3 py-2 border rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
+                />
+              </div>
+            </div>
+            <div>
+              <label className="block text-gray-700 text-sm font-bold mb-2">
+                Saat
+              </label>
+              <CustomTimePicker
+                value={reservation.time}
+                onChange={(time) => setReservation({ ...reservation, time })}
+                minTime="06:00"
+                maxTime="22:00"
+              />
+            </div>
+            <div>
+              <label className="block text-gray-700 text-sm font-bold mb-2">
+                Yetişkin Sayısı
+              </label>
+              <div className="relative">
+                <Users className="absolute left-3 top-1/2 transform -translate-y-1/2 text-gray-400" size={20} />
+                <input
+                  type="text"
+                  inputMode="numeric"
+                  pattern="[0-9]*"
+                  value={reservation.guests}
+                  onChange={handleGuestChange}
+                  placeholder="Yetişkin sayısı giriniz"
+                  className="w-full pl-10 pr-3 py-2 border rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
+                  required
+                />
+              </div>
+            </div>
+            <div>
+              <label className="block text-gray-700 text-sm font-bold mb-2">
+                Çocuk Sayısı
+              </label>
+              <div className="relative">
+                <Baby className="absolute left-3 top-1/2 transform -translate-y-1/2 text-gray-400" size={20} />
+                <input
+                  type="text"
+                  inputMode="numeric"
+                  pattern="[0-9]*"
+                  value={reservation.childCount}
+                  onChange={handleChildCountChange}
+                  placeholder="Çocuk sayısı giriniz"
+                  className="w-full pl-10 pr-3 py-2 border rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
+                />
+              </div>
+            </div>
+            <div className="md:col-span-2">
+              <label className="block text-gray-700 text-sm font-bold mb-2">
+                Notlar
+              </label>
+              <div className="relative">
+                <FileText className="absolute left-3 top-3 text-gray-400" size={20} />
+                <textarea
+                  value={reservation.notes}
+                  onChange={(e) => setReservation({ ...reservation, notes: e.target.value })}
+                  className="w-full pl-10 pr-3 py-2 border rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
+                  rows={3}
+                />
+              </div>
+            </div>
+          </div>
+          <div className="mt-6 space-y-3">
+            <button
+              type="submit"
+              disabled={loading}
+              className="w-full bg-blue-600 text-white py-2 rounded-lg hover:bg-blue-700 transition-colors disabled:bg-blue-400"
+            >
+              {loading ? 'İşleniyor...' : code ? 'Rezervasyonu Güncelle' : 'Rezervasyon Oluştur'}
+            </button>
+            {code && (
+              <button
+                type="button"
+                disabled={loading}
+                onClick={() => setShowCancelConfirm(true)}
+                className="w-full bg-red-600 text-white py-2 rounded-lg hover:bg-red-700 transition-colors disabled:bg-red-400"
+              >
+                Rezervasyonu İptal Et
+              </button>
+            )}
+          </div>
+        </form>
+
+        {/* İptal Onay Dialog */}
+        {showCancelConfirm && (
+          <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50">
+            <div className="bg-white p-6 rounded-lg shadow-xl max-w-md w-full mx-4">
+              <h3 className="text-xl font-bold mb-4">Rezervasyon İptali</h3>
+              <p className="text-gray-600 mb-6">
+                Bu rezervasyonu iptal etmek istediğinizden emin misiniz? Bu işlem geri alınamaz.
+              </p>
+              <div className="flex space-x-3">
+                <button
+                  onClick={() => setShowCancelConfirm(false)}
+                  className="flex-1 px-4 py-2 bg-gray-200 text-gray-800 rounded-lg hover:bg-gray-300 transition-colors"
+                >
+                  Vazgeç
+                </button>
+                <button
+                  onClick={handleCancel}
+                  disabled={loading}
+                  className="flex-1 px-4 py-2 bg-red-600 text-white rounded-lg hover:bg-red-700 transition-colors disabled:bg-red-400"
+                >
+                  {loading ? 'İşleniyor...' : 'İptal Et'}
+                </button>
+              </div>
+            </div>
+          </div>
+        )}
+      </div>
+    </div>
+  );
+};
+
+export default ReservationForm;

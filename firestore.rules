@@ -1,0 +1,85 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    // Kullanıcı kimlik doğrulama fonksiyonu
+    function isAuthenticated() {
+      return request.auth != null;
+    }
+
+    // Admin kontrolü
+    function isAdmin() {
+      return isAuthenticated() && 
+        get(/databases/$(database)/documents/users/$(request.auth.uid)).data.role == 'admin';
+    }
+
+    // Rezervasyon sahibi kontrolü
+    function isReservationOwner(reservationId) {
+      let reservation = get(/databases/$(database)/documents/reservations/$(reservationId)).data;
+      return isAuthenticated() && (
+        reservation.createdBy == request.auth.uid ||
+        reservation.phone == get(/databases/$(database)/documents/users/$(request.auth.uid)).data.phone
+      );
+    }
+
+    // Rezervasyon zaman kontrolü
+    function isValidReservationTime() {
+      let hour = request.resource.data.time.split(':')[0];
+      let minute = request.resource.data.time.split(':')[1];
+      let timeValue = int(hour) * 60 + int(minute);
+      return timeValue >= 360 && timeValue <= 1320; // 06:00 - 22:00 arası
+    }
+
+    // Rezervasyon tarih kontrolü
+    function isValidReservationDate() {
+      let reservationDate = datetime(request.resource.data.date);
+      let now = request.time;
+      return reservationDate.toMillis() >= now.toMillis();
+    }
+
+    // Kullanıcılar koleksiyonu
+    match /users/{userId} {
+      allow read: if isAuthenticated() && (request.auth.uid == userId || isAdmin());
+      allow create: if isAuthenticated();
+      allow update: if isAuthenticated() && (request.auth.uid == userId || isAdmin());
+      allow delete: if isAdmin();
+    }
+
+    // Rezervasyonlar koleksiyonu
+    match /reservations/{reservationId} {
+      // Okuma kuralları
+      allow read: if isAuthenticated() && (
+        isAdmin() || 
+        isReservationOwner(reservationId)
+      );
+
+      // Oluşturma kuralları
+      allow create: if isAuthenticated() && 
+        isValidReservationTime() && 
+        isValidReservationDate() &&
+        request.resource.data.keys().hasAll(['fullName', 'phone', 'date', 'time', 'guests']) &&
+        request.resource.data.guests > 0;
+
+      // Güncelleme kuralları
+      allow update: if isAuthenticated() && (
+        isAdmin() || 
+        isReservationOwner(reservationId)
+      ) &&
+        isValidReservationTime() && 
+        isValidReservationDate();
+
+      // Silme kuralları
+      allow delete: if isAdmin();
+    }
+
+    // Sistem ayarları koleksiyonu
+    match /settings/{settingId} {
+      allow read: if true;
+      allow write: if isAdmin();
+    }
+
+    // Varsayılan kural - diğer tüm erişimleri engelle
+    match /{document=**} {
+      allow read, write: if false;
+    }
+  }
+}
